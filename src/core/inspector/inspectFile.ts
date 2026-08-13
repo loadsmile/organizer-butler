@@ -6,6 +6,7 @@ import { evaluateRules } from "../rules/rulesEngine.js";
 import { inspectCsv } from "./inspectCsv.js";
 import { inspectDocx } from "./inspectDocx.js";
 import { inspectJson } from "./inspectJson.js";
+import { inspectImage } from "./inspectImage.js";
 import { inspectPdf } from "./inspectPdf.js";
 import { inspectPptx } from "./inspectPptx.js";
 import { inspectText } from "./inspectText.js";
@@ -51,6 +52,12 @@ type InspectionConfig = Pick<
   | "maxPptxSlides"
   | "maxPptxMetadataFields"
   | "maxPptxMetadataStringLength"
+  | "maxImageSourceBytes"
+  | "maxImageDimension"
+  | "maxImagePixels"
+  | "maxImageStructures"
+  | "maxImageMetadataFields"
+  | "maxImageMetadataStringLength"
 >;
 
 export async function inspectFile(
@@ -161,6 +168,17 @@ async function extractSupportedFile(
       maxSlides: config.maxPptxSlides,
       maxMetadataFields: config.maxPptxMetadataFields,
       maxMetadataStringLength: config.maxPptxMetadataStringLength,
+    });
+  }
+
+  if (extension === ".jpg" || extension === ".jpeg" || extension === ".png") {
+    return inspectImage(filePath, extension === ".png" ? "png" : "jpeg", {
+      maxSourceBytes: config.maxImageSourceBytes,
+      maxDimension: config.maxImageDimension,
+      maxPixels: config.maxImagePixels,
+      maxStructures: config.maxImageStructures,
+      maxMetadataFields: config.maxImageMetadataFields,
+      maxMetadataStringLength: config.maxImageMetadataStringLength,
     });
   }
 

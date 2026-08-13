@@ -43,6 +43,12 @@ export type OrganizerConfig = {
   maxPptxSlides: number;
   maxPptxMetadataFields: number;
   maxPptxMetadataStringLength: number;
+  maxImageSourceBytes: number;
+  maxImageDimension: number;
+  maxImagePixels: number;
+  maxImageStructures: number;
+  maxImageMetadataFields: number;
+  maxImageMetadataStringLength: number;
 };
 
 const environmentSchema = z.object({
@@ -86,6 +92,12 @@ const environmentSchema = z.object({
   ORGANIZER_MAX_PPTX_SLIDES: z.coerce.number().int().nonnegative().max(10_000).optional(),
   ORGANIZER_MAX_PPTX_METADATA_FIELDS: z.coerce.number().int().nonnegative().max(6).optional(),
   ORGANIZER_MAX_PPTX_METADATA_STRING_LENGTH: z.coerce.number().int().nonnegative().max(100_000).optional(),
+  ORGANIZER_MAX_IMAGE_SOURCE_BYTES: z.coerce.number().int().positive().max(1_000_000_000).optional(),
+  ORGANIZER_MAX_IMAGE_DIMENSION: z.coerce.number().int().positive().max(0xffffffff).optional(),
+  ORGANIZER_MAX_IMAGE_PIXELS: z.coerce.number().int().positive().max(1_000_000_000).optional(),
+  ORGANIZER_MAX_IMAGE_STRUCTURES: z.coerce.number().int().positive().max(1_000_000).optional(),
+  ORGANIZER_MAX_IMAGE_METADATA_FIELDS: z.coerce.number().int().nonnegative().max(4).optional(),
+  ORGANIZER_MAX_IMAGE_METADATA_STRING_LENGTH: z.coerce.number().int().nonnegative().max(100_000).optional(),
 });
 
 function expandHome(value: string): string {
@@ -146,5 +158,11 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): Organi
     maxPptxSlides: parsed.ORGANIZER_MAX_PPTX_SLIDES ?? 1_000,
     maxPptxMetadataFields: parsed.ORGANIZER_MAX_PPTX_METADATA_FIELDS ?? 6,
     maxPptxMetadataStringLength: parsed.ORGANIZER_MAX_PPTX_METADATA_STRING_LENGTH ?? 1_000,
+    maxImageSourceBytes: parsed.ORGANIZER_MAX_IMAGE_SOURCE_BYTES ?? 50_000_000,
+    maxImageDimension: parsed.ORGANIZER_MAX_IMAGE_DIMENSION ?? 32_768,
+    maxImagePixels: parsed.ORGANIZER_MAX_IMAGE_PIXELS ?? 100_000_000,
+    maxImageStructures: parsed.ORGANIZER_MAX_IMAGE_STRUCTURES ?? 10_000,
+    maxImageMetadataFields: parsed.ORGANIZER_MAX_IMAGE_METADATA_FIELDS ?? 4,
+    maxImageMetadataStringLength: parsed.ORGANIZER_MAX_IMAGE_METADATA_STRING_LENGTH ?? 1_000,
   };
 }

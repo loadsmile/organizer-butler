@@ -47,6 +47,12 @@ const inspectionConfig = {
   maxPptxSlides: 10,
   maxPptxMetadataFields: 6,
   maxPptxMetadataStringLength: 20,
+  maxImageSourceBytes: 100_000,
+  maxImageDimension: 10_000,
+  maxImagePixels: 10_000_000,
+  maxImageStructures: 100,
+  maxImageMetadataFields: 4,
+  maxImageMetadataStringLength: 20,
 };
 
 afterEach(async () => {

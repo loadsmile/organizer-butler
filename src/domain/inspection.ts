@@ -224,6 +224,37 @@ export type RejectedPptxExtraction = {
     | "DUPLICATE_PPTX_PART";
 };
 
+export type ImageMetadataField = {
+  key: "title" | "author" | "description" | "copyright";
+  value: string;
+  truncated: boolean;
+};
+
+export type ImageExtraction = {
+  status: "extracted";
+  format: "jpeg" | "png";
+  width: number;
+  height: number;
+  metadata: ImageMetadataField[];
+  metadataFieldsTruncated: boolean;
+  metadataStringsTruncated: boolean;
+};
+
+export type RejectedImageExtraction = {
+  status: "rejected";
+  format: "jpeg" | "png";
+  reason:
+    | "IMAGE_SOURCE_TOO_LARGE"
+    | "IMAGE_DIMENSION_LIMIT_EXCEEDED"
+    | "IMAGE_PIXEL_LIMIT_EXCEEDED"
+    | "IMAGE_STRUCTURE_LIMIT_EXCEEDED"
+    | "INVALID_IMAGE_DIMENSIONS"
+    | "MALFORMED_JPEG"
+    | "MALFORMED_PNG"
+    | "UNSUPPORTED_JPEG_FEATURE"
+    | "UNSUPPORTED_PNG_FEATURE";
+};
+
 export type UnsupportedExtraction = {
   status: "unsupported";
   reason: "UNSUPPORTED_FORMAT";
@@ -247,6 +278,8 @@ export type FileInspection = {
     | RejectedDocxExtraction
     | PptxExtraction
     | RejectedPptxExtraction
+    | ImageExtraction
+    | RejectedImageExtraction
     | UnsupportedExtraction;
   ruleEvidence: RuleEvidence[];
 };
