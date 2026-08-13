@@ -32,9 +32,12 @@ The initial safe-core foundation provides:
 - dependency-free, bounded JPEG and PNG metadata inspection without pixel decoding, decompression, rendering, OCR, or transformation;
 - strict JPEG marker and PNG chunk validation with safe rejection of malformed, unsupported, invalid-dimension, oversized, excessive-pixel, and over-structure-limit images;
 - safe malformed-CSV results and metadata-only fallback for unsupported formats;
+- a minimal read-only stdio MCP server with schema-validated non-recursive scan and opaque-ID inspection tools;
+- one process-long `FileRegistry` shared across all calls handled by an MCP server instance;
+- sanitized structured MCP failures that preserve `OrganizerError` codes without paths, stack traces, or parser details;
 - a thin scan-only CLI.
 
-MCP tools, document body extraction, full spreadsheet data extraction, PDF text extraction, planning, mutation, SQLite history, and undo are not implemented yet.
+Document body extraction, full spreadsheet data extraction, PDF text extraction, planning, mutation, SQLite history, and undo are not implemented yet.
 
 ## Development
 
@@ -50,7 +53,24 @@ Run the scanner against a synthetic directory, not personal files, during develo
 ORGANIZER_DOWNLOADS_DIRECTORY=/path/to/fixture npm run organize
 ```
 
-The scanner does not recurse and never moves or deletes files.
+Run the stdio MCP server against a synthetic fixture directory:
+
+```sh
+ORGANIZER_DOWNLOADS_DIRECTORY=/path/to/fixture npm run mcp
+```
+
+The scanner and MCP server do not recurse and never move or delete files. Do not point development sessions at directories containing personal files.
+
+## MCP tools
+
+The MCP server exposes only these read-only tools:
+
+| Tool | Input | Output |
+| --- | --- | --- |
+| `scan_files` | Strict empty object | `{ ok: true, files }` with non-recursive file metadata and opaque process-local IDs, or a sanitized structured error |
+| `inspect_file` | Strict `{ fileId: string }` | `{ ok: true, inspection }` with bounded extraction and ordered rule evidence, or `{ ok: false, error }` preserving a stable `OrganizerError` code |
+
+`inspect_file` never accepts a path. An ID is usable only by the same running MCP server instance whose long-lived `FileRegistry` issued it. Tool output never includes filesystem paths, stack traces, parser exception details, classification decisions, destinations, plans, or mutations.
 
 ## Inspection limits
 
@@ -188,16 +208,20 @@ Current state:
 62. Generic OPC XML failures map back to each format's existing `MALFORMED_*`, `UNSUPPORTED_*_FEATURE`, `UNSAFE_*_RELATIONSHIP`, and `DUPLICATE_*_PART` reasons without exposing generic failures publicly.
 63. Workbook, document, and presentation schemas, allowed relationship types, macro policies, metadata allowlists, declaration limits, and output construction remain format-specific.
 64. Focused OPC primitive tests cover UTF-8 and XML policy, namespace-aware attributes, content-type overrides, duplicate declarations, relationship envelopes, relationship-part names, and safe and unsafe target normalization.
-65. `npm test` passes 108 tests, `npm run typecheck` passes, and `git diff --check` passes as of this increment.
-66. No MCP, SQLite, OCR, pixel decoding, image mutation, slide text extraction, document body extraction, full spreadsheet data extraction, archive extraction to disk, PDF content extraction, planning, classification decisions, or mutation exists.
+65. The minimal stdio MCP server exposes only strict `scan_files` and `inspect_file` tools, both annotated read-only, non-destructive, idempotent, and closed-world.
+66. Each MCP server instance creates one long-lived `FileRegistry`; every inspection resolves only an opaque ID issued by that instance, and raw paths are absent from the inspection contract.
+67. MCP inputs and outputs are schema-validated. Structured failures preserve stable `OrganizerError` codes and safe messages without stack traces, parser details, causes, or filesystem paths.
+68. MCP transport tests cover tool discovery, successful scan and inspection calls, same-instance ID continuity, cross-instance and fabricated IDs, stale files, invalid and raw-path inputs, unsupported formats, rule evidence, and path omission.
+69. `npm test` passes 115 tests, `npm run typecheck` passes, and `git diff --check` passes as of this increment.
+70. No SQLite, OCR, pixel decoding, image mutation, slide text extraction, document body extraction, full spreadsheet data extraction, archive extraction to disk, PDF content extraction, planning, classification decisions, destination selection, execution, audit history, undo, or mutation tool exists.
 
 Recommended next increment:
 
-1. Add a minimal read-only MCP server exposing only non-recursive scan and file inspection operations.
-2. Create one long-lived `FileRegistry` for the server process and require every inspection to resolve an opaque ID through that same registry; never accept raw paths from MCP callers.
-3. Define narrow, schema-validated tool inputs and outputs that preserve existing `OrganizerError` codes and inspection rejection reasons without returning stack traces, parser details, or filesystem paths.
-4. Keep deterministic rules as ordered evidence only; do not add classification decisions, destination selection, planning, execution, audit history, undo, or mutation tools in this increment.
-5. Add focused transport tests for successful scan and inspection calls, fabricated and stale IDs, invalid inputs, unsupported formats, and path omission.
-6. Add lifecycle tests proving IDs remain usable across separate tool calls handled by the same server instance and are rejected by a different registry instance.
-7. Document the MCP development command and tool contracts without encouraging use against personal files during development.
-8. Run `npm test`, `npm run typecheck`, and `git diff --check`, then update this handoff with the verified test count.
+1. Add bounded plain-text extraction for DOCX body content while retaining the existing package, relationship, source, compressed-byte, uncompressed-byte, and XML safety boundaries.
+2. Introduce independent DOCX body-text limits for source parts traversed, extracted Unicode characters, paragraphs retained, and XML structures visited; document each in `.env.example` and the inspection-limit table.
+3. Read only the already validated main document part and deliberately supported text-bearing elements; continue to omit comments, revisions, headers, footers, footnotes, endnotes, text boxes, hyperlinks, fields, images, macros, external links, embedded files, and custom properties.
+4. Define explicit successful extraction and structured rejection/truncation output without returning raw XML, relationship targets, package entry names, parser details, or partial content on malformed input.
+5. Keep all MCP contracts read-only and opaque-ID-only; expose the richer DOCX inspection only through the existing `inspect_file` result rather than adding tools or path inputs.
+6. Add compact generated fixtures for empty bodies, multiple paragraphs, tabs and line breaks, Unicode truncation, every new limit, malformed body XML, stale files, path omission, and proof that excluded document parts are not read or returned.
+7. Keep deterministic rules as ordered evidence only; do not add classification, destination selection, planning, execution, audit history, undo, or mutation.
+8. Run `npm test`, `npm run typecheck`, and `git diff --check`, then update this handoff with the verified test count and the next detailed increment.
