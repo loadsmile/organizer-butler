@@ -30,6 +30,11 @@ type PptxInspectionConfig = {
   maxSlides: number;
   maxMetadataFields: number;
   maxMetadataStringLength: number;
+  maxSlideParts: number;
+  maxRetainedSlides: number;
+  maxSlideCharacters: number;
+  maxTextBlocksPerSlide: number;
+  maxSlideStructures: number;
 };
 
 const CORE_PROPERTIES_NAMESPACE = "http://schemas.openxmlformats.org/package/2006/metadata/core-properties";
@@ -42,6 +47,10 @@ const DOCUMENT_RELATIONSHIP_NAMESPACES = new Set([
   "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
   "http://purl.oclc.org/ooxml/officeDocument/relationships",
 ]);
+const DRAWINGML_NAMESPACES = new Set([
+  "http://schemas.openxmlformats.org/drawingml/2006/main",
+  "http://purl.oclc.org/ooxml/drawingml/main",
+]);
 const OFFICE_DOCUMENT_RELATIONSHIP_TYPES = new Set(
   [...DOCUMENT_RELATIONSHIP_NAMESPACES].map((namespace) => `${namespace}/officeDocument`),
 );
@@ -52,6 +61,9 @@ const CORE_PROPERTIES_RELATIONSHIP_TYPE =
   "http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties";
 const PRESENTATION_CONTENT_TYPES = new Set([
   "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml",
+]);
+const SLIDE_CONTENT_TYPES = new Set([
+  "application/vnd.openxmlformats-officedocument.presentationml.slide+xml",
 ]);
 const MACRO_CONTENT_TYPES = new Set([
   "application/vnd.ms-powerpoint.presentation.macroEnabled.main+xml",
@@ -142,7 +154,33 @@ export async function inspectPptx(
     const parts = readMetadataParts(source, selectedEntries, config);
     const slideRelationshipIds = parsePresentation(parts[2]!, config.maxSlides);
     const presentationRelationships = parseOpcRelationships(parts[3]!);
-    validatePresentationRelationships(slideRelationshipIds, presentationRelationships, presentationPath, entries);
+    const slideEntries = validatePresentationRelationships(
+      slideRelationshipIds,
+      presentationRelationships,
+      presentationPath,
+      entries,
+      contentTypes,
+    );
+    if (slideEntries.length > config.maxSlideParts) {
+      throw new PptxRejection("PPTX_SLIDE_PART_LIMIT_EXCEEDED");
+    }
+    const slideParts = readMetadataParts(source, slideEntries, config);
+    let retainedCharacters = 0;
+    let visitedStructures = 0;
+    const slides: PptxExtraction["slides"] = [];
+    for (const [index, part] of slideParts.entries()) {
+      const preview = parseSlideText(part, config, retainedCharacters, visitedStructures);
+      visitedStructures += preview.visitedStructures;
+      if (slides.length < config.maxRetainedSlides) {
+        retainedCharacters += preview.retainedCharacters;
+        slides.push({
+          slideNumber: index + 1,
+          textBlocks: preview.textBlocks,
+          textBlocksTruncated: preview.textBlocksTruncated,
+          charactersTruncated: preview.charactersTruncated,
+        });
+      }
+    }
 
     const allMetadata = corePropertiesEntry === undefined ? [] : parseCoreProperties(parts[4]!);
     const retainedMetadata = allMetadata.slice(0, config.maxMetadataFields);
@@ -162,6 +200,8 @@ export async function inspectPptx(
       metadata,
       metadataFieldsTruncated: allMetadata.length > metadata.length,
       metadataStringsTruncated,
+      slides,
+      slidesTruncated: slideParts.length > slides.length,
     };
   } catch (error) {
     if (error instanceof PptxRejection) return rejected(error.reason);
@@ -244,12 +284,92 @@ function parseCoreProperties(source: Buffer): PptxMetadataField[] {
   });
 }
 
+function parseSlideText(
+  source: Buffer,
+  config: PptxInspectionConfig,
+  previouslyRetainedCharacters: number,
+  previouslyVisitedStructures: number,
+): PptxExtraction["slides"][number] & { retainedCharacters: number; visitedStructures: number } {
+  const textBlocks: string[] = [];
+  const stack: Array<{ uri: string; local: string }> = [];
+  let structures = 0;
+  let blockCount = 0;
+  let block = "";
+  let retainedCharacters = 0;
+  let charactersTruncated = false;
+
+  const append = (value: string): void => {
+    if (blockCount > config.maxTextBlocksPerSlide) return;
+    const characters = [...value];
+    const available = Math.max(0, config.maxSlideCharacters - previouslyRetainedCharacters - retainedCharacters);
+    if (characters.length > available) charactersTruncated = true;
+    if (available === 0) return;
+    const retained = characters.slice(0, available);
+    block += retained.join("");
+    retainedCharacters += retained.length;
+  };
+
+  parseOpcXml(source, {
+    onOpenTag(tag) {
+      structures += 1;
+      if (previouslyVisitedStructures + structures > config.maxSlideStructures) {
+        throw new PptxRejection("PPTX_SLIDE_STRUCTURE_LIMIT_EXCEEDED");
+      }
+      stack.push({ uri: tag.uri, local: tag.local });
+      if (stack.length === 1 && (!PRESENTATION_NAMESPACES.has(tag.uri) || tag.local !== "sld")) {
+        throw new PptxRejection("UNSUPPORTED_PPTX_FEATURE");
+      }
+      if (isShapeTextParagraph(stack)) {
+        blockCount += 1;
+        block = "";
+      }
+    },
+    onText(value) {
+      if (isSupportedDrawingText(stack)) append(value);
+    },
+    onCloseTag() {
+      if (isShapeTextParagraph(stack) && textBlocks.length < config.maxTextBlocksPerSlide) {
+        textBlocks.push(block);
+      }
+      stack.pop();
+    },
+  });
+
+  if (stack.length !== 0) throw new PptxRejection("MALFORMED_PPTX");
+  return {
+    slideNumber: 0,
+    textBlocks,
+    textBlocksTruncated: blockCount > textBlocks.length,
+    charactersTruncated,
+    retainedCharacters,
+    visitedStructures: structures,
+  };
+}
+
+function isShapeTextParagraph(stack: Array<{ uri: string; local: string }>): boolean {
+  const paragraph = stack.at(-1);
+  const textBody = stack.at(-2);
+  const shape = stack.at(-3);
+  return paragraph !== undefined && DRAWINGML_NAMESPACES.has(paragraph.uri) && paragraph.local === "p" &&
+    textBody !== undefined && PRESENTATION_NAMESPACES.has(textBody.uri) && textBody.local === "txBody" &&
+    shape !== undefined && PRESENTATION_NAMESPACES.has(shape.uri) && shape.local === "sp";
+}
+
+function isSupportedDrawingText(stack: Array<{ uri: string; local: string }>): boolean {
+  const text = stack.at(-1);
+  const parent = stack.at(-2)!;
+  return text !== undefined && DRAWINGML_NAMESPACES.has(text.uri) && text.local === "t" &&
+    DRAWINGML_NAMESPACES.has(parent.uri) && (parent.local === "r" || parent.local === "fld") &&
+    isShapeTextParagraph(stack.slice(0, -2));
+}
+
 function validatePresentationRelationships(
   slideRelationshipIds: string[],
   relationships: OpcRelationship[],
   presentationPath: string,
   entries: Map<string, OoxmlPackageEntry>,
-): void {
+  contentTypes: Map<string, string>,
+): OoxmlPackageEntry[] {
   const byId = new Map(relationships.map((item) => [item.id, item]));
   for (const relationship of relationships) {
     const namespace = [...DOCUMENT_RELATIONSHIP_NAMESPACES].find((item) => relationship.type.startsWith(`${item}/`));
@@ -268,6 +388,14 @@ function validatePresentationRelationships(
       throw new PptxRejection("UNSUPPORTED_PPTX_FEATURE");
     }
   }
+  return slideRelationshipIds.map((relationshipId) => {
+    const relationship = byId.get(relationshipId)!;
+    const target = resolveOpcRelationshipTarget(presentationPath, relationship.target);
+    if (!SLIDE_CONTENT_TYPES.has(contentTypes.get(target) ?? "")) {
+      throw new PptxRejection("MALFORMED_PPTX");
+    }
+    return requireOoxmlEntry(entries, target);
+  });
 }
 
 function opcReason(error: OpcXmlError): RejectedPptxExtraction["reason"] {

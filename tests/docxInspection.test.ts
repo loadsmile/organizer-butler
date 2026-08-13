@@ -34,12 +34,23 @@ const inspectionConfig = {
   maxXlsxWorksheets: 10,
   maxXlsxRetainedSheetNames: 10,
   maxXlsxSheetNameLength: 20,
+  maxXlsxWorksheetParts: 10,
+  maxXlsxRetainedSheets: 10,
+  maxXlsxRowsPerSheet: 10,
+  maxXlsxCellsPerRow: 10,
+  maxXlsxCharacters: 100,
+  maxXlsxSharedStringStructures: 100,
+  maxXlsxWorksheetStructures: 100,
   maxDocxSourceBytes: 100_000,
   maxDocxPackageEntries: 20,
   maxDocxCompressedMetadataBytes: 20_000,
   maxDocxUncompressedMetadataBytes: 20_000,
   maxDocxMetadataFields: 6,
   maxDocxMetadataStringLength: 20,
+  maxDocxBodyParts: 1,
+  maxDocxBodyCharacters: 100,
+  maxDocxBodyParagraphs: 10,
+  maxDocxBodyStructures: 100,
   maxPptxSourceBytes: 100_000,
   maxPptxPackageEntries: 20,
   maxPptxCompressedMetadataBytes: 20_000,
@@ -47,6 +58,11 @@ const inspectionConfig = {
   maxPptxSlides: 10,
   maxPptxMetadataFields: 6,
   maxPptxMetadataStringLength: 20,
+  maxPptxSlideParts: 10,
+  maxPptxRetainedSlides: 10,
+  maxPptxSlideCharacters: 100,
+  maxPptxTextBlocksPerSlide: 10,
+  maxPptxSlideStructures: 100,
   maxImageSourceBytes: 100_000,
   maxImageDimension: 10_000,
   maxImagePixels: 10_000_000,
@@ -138,6 +154,7 @@ function createDocx(options: {
   encrypted?: boolean;
   rootTarget?: string;
   documentRelationships?: string;
+  bodyXml?: string;
   duplicateDocument?: boolean;
   extraEntries?: ZipEntry[];
 } = {}): Buffer {
@@ -156,7 +173,11 @@ function createDocx(options: {
   const documentContentType = options.documentContentType ?? (options.macroEnabled
     ? "application/vnd.ms-word.document.macroEnabled.main+xml"
     : "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml");
-  const document = { name: "word/document.xml", content: "body text must not be read", method: 99 };
+  const document = {
+    name: "word/document.xml",
+    content: options.bodyXml ?? `<?xml version="1.0" encoding="UTF-8"?>
+      <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>`,
+  };
   return createZip([
     {
       name: "[Content_Types].xml",
@@ -213,6 +234,7 @@ describe("DOCX inspection", () => {
       metadata: [],
       metadataFieldsTruncated: false,
       metadataStringsTruncated: false,
+      bodyText: { paragraphs: [], paragraphsTruncated: false, charactersTruncated: false },
     });
     assert.equal(populated.extraction.status, "extracted");
     assert.equal(populated.extraction.format, "docx");
@@ -293,14 +315,88 @@ describe("DOCX inspection", () => {
     assert.deepEqual(inspection.extraction, { status: "rejected", format: "docx", reason: "DUPLICATE_DOCX_PART" });
   });
 
-  it("does not read body content or expose custom properties", async () => {
+  it("extracts only direct body paragraph run text, tabs, and line breaks", async () => {
+    const inspection = await inspectDocx(createDocx({
+      bodyXml: `<?xml version="1.0" encoding="UTF-8"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:body>
+            <w:p><w:r><w:t>Hello </w:t><w:tab/><w:t>world</w:t><w:br/><w:t>next</w:t></w:r></w:p>
+            <w:p><w:r><w:t>Zoë 😀</w:t></w:r></w:p>
+          </w:body>
+        </w:document>`,
+    }));
+
+    assert.equal(inspection.extraction.status, "extracted");
+    assert.equal(inspection.extraction.format, "docx");
+    assert.deepEqual(inspection.extraction.bodyText, {
+      paragraphs: ["Hello \tworld\nnext", "Zoë 😀"],
+      paragraphsTruncated: false,
+      charactersTruncated: false,
+    });
+  });
+
+  it("bounds body parts, Unicode characters, paragraphs, and XML structures independently", async () => {
+    const source = createDocx({
+      bodyXml: `<?xml version="1.0" encoding="UTF-8"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+          <w:p><w:r><w:t>A😀B</w:t></w:r></w:p><w:p><w:r><w:t>Second</w:t></w:r></w:p>
+        </w:body></w:document>`,
+    });
+    const truncated = await inspectDocx(source, {
+      ...inspectionConfig,
+      maxDocxBodyCharacters: 2,
+      maxDocxBodyParagraphs: 1,
+    });
+    assert.equal(truncated.extraction.status, "extracted");
+    assert.equal(truncated.extraction.format, "docx");
+    assert.deepEqual(truncated.extraction.bodyText, {
+      paragraphs: ["A😀"],
+      paragraphsTruncated: true,
+      charactersTruncated: true,
+    });
+
+    const noParts = await inspectDocx(source, { ...inspectionConfig, maxDocxBodyParts: 0 });
+    assert.deepEqual(noParts.extraction, {
+      status: "rejected", format: "docx", reason: "DOCX_BODY_PART_LIMIT_EXCEEDED",
+    });
+    const tooManyStructures = await inspectDocx(source, { ...inspectionConfig, maxDocxBodyStructures: 2 });
+    assert.deepEqual(tooManyStructures.extraction, {
+      status: "rejected", format: "docx", reason: "DOCX_BODY_STRUCTURE_LIMIT_EXCEEDED",
+    });
+  });
+
+  it("rejects malformed body XML without partial metadata or text", async () => {
+    const inspection = await inspectDocx(createDocx({
+      metadata: { title: "Must not survive" },
+      bodyXml: '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>',
+    }));
+    assert.deepEqual(inspection.extraction, { status: "rejected", format: "docx", reason: "MALFORMED_DOCX" });
+    assert.equal("metadata" in inspection.extraction, false);
+    assert.equal("bodyText" in inspection.extraction, false);
+  });
+
+  it("omits unsupported body containers and does not read excluded parts", async () => {
     const inspection = await inspectDocx(createDocx({
       metadata: { title: "Safe" },
-      extraEntries: [{ name: "docProps/custom.xml", content: "private custom metadata", method: 99 }],
+      bodyXml: `<?xml version="1.0" encoding="UTF-8"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+          <w:p><w:r><w:t>Retained</w:t></w:r><w:hyperlink><w:r><w:t>link secret</w:t></w:r></w:hyperlink>
+            <w:ins><w:r><w:t>revision secret</w:t></w:r></w:ins><w:r><w:instrText>field secret</w:instrText></w:r></w:p>
+          <w:tbl><w:tr><w:tc><w:p><w:r><w:t>table secret</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+        </w:body></w:document>`,
+      extraEntries: [
+        { name: "docProps/custom.xml", content: "private custom metadata", method: 99 },
+        { name: "word/comments.xml", content: "comment secret", method: 99 },
+        { name: "word/header1.xml", content: "header secret", method: 99 },
+      ],
     }));
     assert.equal(inspection.extraction.status, "extracted");
-    assert.equal(JSON.stringify(inspection.extraction).includes("body text"), false);
-    assert.equal(JSON.stringify(inspection.extraction).includes("private custom metadata"), false);
+    assert.equal(inspection.extraction.format, "docx");
+    assert.deepEqual(inspection.extraction.bodyText.paragraphs, ["Retained"]);
+    const output = JSON.stringify(inspection.extraction);
+    for (const excluded of ["link secret", "revision secret", "field secret", "table secret", "private custom metadata", "comment secret", "header secret"]) {
+      assert.equal(output.includes(excluded), false);
+    }
   });
 
   it("rejects DOCX files changed after scanning", async () => {

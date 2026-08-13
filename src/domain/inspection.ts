@@ -130,6 +130,26 @@ export type XlsxSheetMetadata = {
   truncated: boolean;
 };
 
+export type XlsxCellPreview = {
+  reference: string;
+  type: "number" | "boolean" | "string";
+  value: string | boolean;
+  truncated: boolean;
+};
+
+export type XlsxRowPreview = {
+  rowNumber: number;
+  cells: XlsxCellPreview[];
+  cellsTruncated: boolean;
+};
+
+export type XlsxSheetPreview = {
+  sheetNumber: number;
+  rows: XlsxRowPreview[];
+  rowsTruncated: boolean;
+  charactersTruncated: boolean;
+};
+
 export type XlsxExtraction = {
   status: "extracted";
   format: "xlsx";
@@ -138,6 +158,8 @@ export type XlsxExtraction = {
   sheetCount: number;
   sheetNamesTruncated: boolean;
   sheetNameStringsTruncated: boolean;
+  sheetPreviews: XlsxSheetPreview[];
+  sheetPreviewsTruncated: boolean;
 };
 
 export type RejectedXlsxExtraction = {
@@ -149,6 +171,9 @@ export type RejectedXlsxExtraction = {
     | "XLSX_COMPRESSED_METADATA_LIMIT_EXCEEDED"
     | "XLSX_UNCOMPRESSED_METADATA_LIMIT_EXCEEDED"
     | "XLSX_WORKSHEET_LIMIT_EXCEEDED"
+    | "XLSX_WORKSHEET_PART_LIMIT_EXCEEDED"
+    | "XLSX_WORKSHEET_STRUCTURE_LIMIT_EXCEEDED"
+    | "XLSX_SHARED_STRING_STRUCTURE_LIMIT_EXCEEDED"
     | "ENCRYPTED_XLSX"
     | "MACRO_ENABLED_XLSX"
     | "MALFORMED_XLSX"
@@ -171,6 +196,11 @@ export type DocxExtraction = {
   metadata: DocxMetadataField[];
   metadataFieldsTruncated: boolean;
   metadataStringsTruncated: boolean;
+  bodyText: {
+    paragraphs: string[];
+    paragraphsTruncated: boolean;
+    charactersTruncated: boolean;
+  };
 };
 
 export type RejectedDocxExtraction = {
@@ -181,6 +211,8 @@ export type RejectedDocxExtraction = {
     | "DOCX_PACKAGE_ENTRY_LIMIT_EXCEEDED"
     | "DOCX_COMPRESSED_METADATA_LIMIT_EXCEEDED"
     | "DOCX_UNCOMPRESSED_METADATA_LIMIT_EXCEEDED"
+    | "DOCX_BODY_PART_LIMIT_EXCEEDED"
+    | "DOCX_BODY_STRUCTURE_LIMIT_EXCEEDED"
     | "ENCRYPTED_DOCX"
     | "MACRO_ENABLED_DOCX"
     | "MALFORMED_DOCX"
@@ -196,6 +228,13 @@ export type PptxMetadataField = {
   truncated: boolean;
 };
 
+export type PptxSlidePreview = {
+  slideNumber: number;
+  textBlocks: string[];
+  textBlocksTruncated: boolean;
+  charactersTruncated: boolean;
+};
+
 export type PptxExtraction = {
   status: "extracted";
   format: "pptx";
@@ -204,6 +243,8 @@ export type PptxExtraction = {
   metadata: PptxMetadataField[];
   metadataFieldsTruncated: boolean;
   metadataStringsTruncated: boolean;
+  slides: PptxSlidePreview[];
+  slidesTruncated: boolean;
 };
 
 export type RejectedPptxExtraction = {
@@ -215,6 +256,8 @@ export type RejectedPptxExtraction = {
     | "PPTX_COMPRESSED_METADATA_LIMIT_EXCEEDED"
     | "PPTX_UNCOMPRESSED_METADATA_LIMIT_EXCEEDED"
     | "PPTX_SLIDE_LIMIT_EXCEEDED"
+    | "PPTX_SLIDE_PART_LIMIT_EXCEEDED"
+    | "PPTX_SLIDE_STRUCTURE_LIMIT_EXCEEDED"
     | "ENCRYPTED_PPTX"
     | "MACRO_ENABLED_PPTX"
     | "MALFORMED_PPTX"

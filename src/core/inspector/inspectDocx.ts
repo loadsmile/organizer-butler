@@ -28,6 +28,10 @@ type DocxInspectionConfig = {
   maxUncompressedMetadataBytes: number;
   maxMetadataFields: number;
   maxMetadataStringLength: number;
+  maxBodyParts: number;
+  maxBodyCharacters: number;
+  maxBodyParagraphs: number;
+  maxBodyStructures: number;
 };
 
 const CORE_PROPERTIES_NAMESPACE = "http://schemas.openxmlformats.org/package/2006/metadata/core-properties";
@@ -51,6 +55,10 @@ const MACRO_CONTENT_TYPES = new Set([
   "application/vnd.ms-office.vbaProject",
 ]);
 const CORE_PROPERTIES_CONTENT_TYPE = "application/vnd.openxmlformats-package.core-properties+xml";
+const WORDPROCESSING_NAMESPACES = new Set([
+  "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+  "http://purl.oclc.org/ooxml/wordprocessingml/main",
+]);
 const ALLOWED_DOCUMENT_RELATIONSHIP_SUFFIXES = new Set([
   "comments",
   "customXml",
@@ -114,13 +122,14 @@ export async function inspectDocx(
     if (!DOCUMENT_CONTENT_TYPES.has(documentContentType)) {
       throw new DocxRejection("UNSUPPORTED_DOCX_FEATURE");
     }
-    requireOoxmlEntry(entries, documentPath);
+    const documentEntry = requireOoxmlEntry(entries, documentPath);
+    if (config.maxBodyParts < 1) throw new DocxRejection("DOCX_BODY_PART_LIMIT_EXCEEDED");
 
     const documentRelationshipsEntry = entries.get(opcRelationshipPartName(documentPath));
     const coreRelationships = rootRelationships.filter((item) => CORE_PROPERTIES_RELATIONSHIP_TYPES.has(item.type));
     if (coreRelationships.length > 1) throw new DocxRejection("MALFORMED_DOCX");
 
-    const selectedEntries = [contentTypesEntry, rootRelationshipsEntry];
+    const selectedEntries = [contentTypesEntry, rootRelationshipsEntry, documentEntry];
     if (documentRelationshipsEntry !== undefined) selectedEntries.push(documentRelationshipsEntry);
 
     let corePropertiesEntry: OoxmlPackageEntry | undefined;
@@ -134,7 +143,8 @@ export async function inspectDocx(
     }
 
     const parts = readMetadataParts(source, selectedEntries, config);
-    let partIndex = 2;
+    const bodyText = parseBodyText(parts[2]!, config);
+    let partIndex = 3;
     if (documentRelationshipsEntry !== undefined) {
       validateDocumentRelationships(parseOpcRelationships(parts[partIndex]!), documentPath, entries);
       partIndex += 1;
@@ -157,6 +167,7 @@ export async function inspectDocx(
       metadata,
       metadataFieldsTruncated: allMetadata.length > metadata.length,
       metadataStringsTruncated,
+      bodyText,
     };
   } catch (error) {
     if (error instanceof DocxRejection) return rejected(error.reason);
@@ -164,6 +175,76 @@ export async function inspectDocx(
     if (error instanceof OpcXmlError) return rejected(opcReason(error));
     return rejected("MALFORMED_DOCX");
   }
+}
+
+function parseBodyText(source: Buffer, config: DocxInspectionConfig): DocxExtraction["bodyText"] {
+  const paragraphs: string[] = [];
+  const stack: Array<{ uri: string; local: string }> = [];
+  let structures = 0;
+  let bodyCount = 0;
+  let paragraphCount = 0;
+  let paragraph = "";
+  let retainedCharacters = 0;
+  let charactersTruncated = false;
+
+  const append = (value: string): void => {
+    if (paragraphs.length >= config.maxBodyParagraphs) return;
+    const characters = [...value];
+    const available = Math.max(0, config.maxBodyCharacters - retainedCharacters);
+    if (characters.length > available) charactersTruncated = true;
+    if (available === 0) return;
+    const retained = characters.slice(0, available).join("");
+    paragraph += retained;
+    retainedCharacters += [...retained].length;
+  };
+
+  parseOpcXml(source, {
+    onOpenTag(tag) {
+      structures += 1;
+      if (structures > config.maxBodyStructures) {
+        throw new DocxRejection("DOCX_BODY_STRUCTURE_LIMIT_EXCEEDED");
+      }
+      stack.push({ uri: tag.uri, local: tag.local });
+      if (stack.length === 1 && (!WORDPROCESSING_NAMESPACES.has(tag.uri) || tag.local !== "document")) {
+        throw new DocxRejection("UNSUPPORTED_DOCX_FEATURE");
+      }
+      if (stack.length === 2 && WORDPROCESSING_NAMESPACES.has(tag.uri) && tag.local === "body") bodyCount += 1;
+      if (isDirectBodyParagraph(stack)) {
+        paragraphCount += 1;
+        paragraph = "";
+      } else if (isDirectParagraphRunChild(stack, "tab")) {
+        append("\t");
+      } else if (isDirectParagraphRunChild(stack, "br") || isDirectParagraphRunChild(stack, "cr")) {
+        append("\n");
+      }
+    },
+    onText(value) {
+      if (isDirectParagraphRunChild(stack, "t")) append(value);
+    },
+    onCloseTag() {
+      if (isDirectBodyParagraph(stack) && paragraphs.length < config.maxBodyParagraphs) paragraphs.push(paragraph);
+      stack.pop();
+    },
+  });
+
+  if (stack.length !== 0 || bodyCount !== 1) throw new DocxRejection("MALFORMED_DOCX");
+  return {
+    paragraphs,
+    paragraphsTruncated: paragraphCount > paragraphs.length,
+    charactersTruncated,
+  };
+}
+
+function isDirectBodyParagraph(stack: Array<{ uri: string; local: string }>): boolean {
+  return stack.length === 3 &&
+    stack.every((item) => WORDPROCESSING_NAMESPACES.has(item.uri)) &&
+    stack[0]!.local === "document" && stack[1]!.local === "body" && stack[2]!.local === "p";
+}
+
+function isDirectParagraphRunChild(stack: Array<{ uri: string; local: string }>, local: string): boolean {
+  return stack.length === 5 && isDirectBodyParagraph(stack.slice(0, 3)) &&
+    stack[3]!.uri === stack[2]!.uri && stack[3]!.local === "r" &&
+    stack[4]!.uri === stack[2]!.uri && stack[4]!.local === local;
 }
 
 function readMetadataParts(source: Buffer, entries: OoxmlPackageEntry[], config: DocxInspectionConfig): Buffer[] {

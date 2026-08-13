@@ -34,12 +34,23 @@ const inspectionConfig = {
   maxXlsxWorksheets: 10,
   maxXlsxRetainedSheetNames: 10,
   maxXlsxSheetNameLength: 20,
+  maxXlsxWorksheetParts: 10,
+  maxXlsxRetainedSheets: 10,
+  maxXlsxRowsPerSheet: 10,
+  maxXlsxCellsPerRow: 10,
+  maxXlsxCharacters: 100,
+  maxXlsxSharedStringStructures: 100,
+  maxXlsxWorksheetStructures: 100,
   maxDocxSourceBytes: 100_000,
   maxDocxPackageEntries: 20,
   maxDocxCompressedMetadataBytes: 20_000,
   maxDocxUncompressedMetadataBytes: 20_000,
   maxDocxMetadataFields: 6,
   maxDocxMetadataStringLength: 20,
+  maxDocxBodyParts: 1,
+  maxDocxBodyCharacters: 100,
+  maxDocxBodyParagraphs: 10,
+  maxDocxBodyStructures: 100,
   maxPptxSourceBytes: 100_000,
   maxPptxPackageEntries: 20,
   maxPptxCompressedMetadataBytes: 20_000,
@@ -47,6 +58,11 @@ const inspectionConfig = {
   maxPptxSlides: 10,
   maxPptxMetadataFields: 6,
   maxPptxMetadataStringLength: 20,
+  maxPptxSlideParts: 10,
+  maxPptxRetainedSlides: 10,
+  maxPptxSlideCharacters: 100,
+  maxPptxTextBlocksPerSlide: 10,
+  maxPptxSlideStructures: 100,
   maxImageSourceBytes: 100_000,
   maxImageDimension: 10_000,
   maxImagePixels: 10_000_000,
@@ -129,6 +145,16 @@ function xmlEscape(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;");
 }
 
+function slideXml(blocks: string[], extra = ""): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+    <p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+      xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+      <p:cSld><p:spTree><p:sp><p:txBody>
+        ${blocks.map((block) => `<a:p><a:r><a:t>${xmlEscape(block)}</a:t></a:r></a:p>`).join("")}
+      </p:txBody></p:sp></p:spTree></p:cSld>${extra}
+    </p:sld>`;
+}
+
 function createPptx(options: {
   slides?: number;
   metadata?: Partial<Record<"title" | "subject" | "creator" | "keywords" | "description" | "lastModifiedBy", string>>;
@@ -142,6 +168,7 @@ function createPptx(options: {
   slideTarget?: string;
   externalRelationship?: boolean;
   duplicatePresentation?: boolean;
+  slideXmls?: string[];
   extraEntries?: ZipEntry[];
 } = {}): Buffer {
   const slideCount = options.slides ?? 0;
@@ -173,8 +200,9 @@ function createPptx(options: {
   }).join("");
   const slides = Array.from({ length: slideCount }, (_, index): ZipEntry => ({
     name: `ppt/slides/slide${index + 1}.xml`,
-    content: `private slide text ${index + 1}`,
-    method: 99,
+    content: options.slideXmls?.[index] ?? `<?xml version="1.0" encoding="UTF-8"?>
+      <p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+        xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld/></p:sld>`,
   }));
 
   return createZip([
@@ -183,6 +211,7 @@ function createPptx(options: {
       content: `<?xml version="1.0" encoding="UTF-8"?>
         <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
           <Override PartName="/ppt/presentation.xml" ContentType="${presentationContentType}"/>
+          ${Array.from({ length: slideCount }, (_, index) => `<Override PartName="/ppt/slides/slide${index + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>`).join("")}
           ${includeCore ? '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>' : ""}
         </Types>`,
       flags: options.encrypted ? 1 : 0,
@@ -240,6 +269,8 @@ describe("PPTX inspection", () => {
       metadata: [],
       metadataFieldsTruncated: false,
       metadataStringsTruncated: false,
+      slides: [],
+      slidesTruncated: false,
     });
     assert.equal(populated.extraction.status, "extracted");
     assert.equal(populated.extraction.format, "pptx");
@@ -270,6 +301,88 @@ describe("PPTX inspection", () => {
     assert.equal(inspection.extraction.metadataStringsTruncated, true);
   });
 
+  it("extracts ordered DrawingML text blocks from slides in presentation order", async () => {
+    const inspection = await inspectPptx(createPptx({
+      slides: 2,
+      slideXmls: [
+        `<?xml version="1.0" encoding="UTF-8"?>
+          <p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <p:cSld><p:spTree><p:sp><p:txBody>
+              <a:p><a:r><a:t>First</a:t></a:r><a:r><a:t> run</a:t></a:r><a:fld><a:t> field</a:t></a:fld></a:p>
+              <a:p><a:r><a:t>Second</a:t></a:r></a:p>
+            </p:txBody></p:sp></p:spTree></p:cSld>
+          </p:sld>`,
+        slideXml(["Third"], '<p:extLst><p:ext uri="private"><private:text xmlns:private="urn:private">Hidden</private:text></p:ext></p:extLst>'),
+      ],
+    }));
+
+    assert.equal(inspection.extraction.status, "extracted");
+    assert.equal(inspection.extraction.format, "pptx");
+    assert.deepEqual(inspection.extraction.slides, [
+      {
+        slideNumber: 1,
+        textBlocks: ["First run field", "Second"],
+        textBlocksTruncated: false,
+        charactersTruncated: false,
+      },
+      {
+        slideNumber: 2,
+        textBlocks: ["Third"],
+        textBlocksTruncated: false,
+        charactersTruncated: false,
+      },
+    ]);
+    assert.equal(inspection.extraction.slidesTruncated, false);
+    assert.equal(JSON.stringify(inspection.extraction).includes("Hidden"), false);
+  });
+
+  it("omits DrawingML text outside direct shape text-body runs and fields", async () => {
+    const inspection = await inspectPptx(createPptx({
+      slides: 1,
+      slideXmls: [`<?xml version="1.0" encoding="UTF-8"?>
+        <p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <p:cSld><p:spTree>
+            <p:sp><p:txBody>
+              <a:p><a:r><a:t>Kept</a:t><a:p><a:r><a:t>Nested</a:t></a:r></a:p></a:r></a:p>
+              <a:p><a:hyperlink><a:r><a:t>Wrapped</a:t></a:r></a:hyperlink></a:p>
+            </p:txBody></p:sp>
+            <p:graphicFrame><a:p><a:r><a:t>Graphic</a:t></a:r></a:p></p:graphicFrame>
+          </p:spTree></p:cSld>
+        </p:sld>`],
+    }));
+
+    assert.equal(inspection.extraction.status, "extracted");
+    assert.equal(inspection.extraction.format, "pptx");
+    assert.deepEqual(inspection.extraction.slides[0]?.textBlocks, ["Kept", ""]);
+    assert.equal(JSON.stringify(inspection.extraction).includes("Nested"), false);
+    assert.equal(JSON.stringify(inspection.extraction).includes("Wrapped"), false);
+    assert.equal(JSON.stringify(inspection.extraction).includes("Graphic"), false);
+  });
+
+  it("bounds retained slides, text blocks, and total Unicode characters with explicit flags", async () => {
+    const inspection = await inspectPptx(createPptx({
+      slides: 2,
+      slideXmls: [slideXml(["A😀B", "omitted"]), slideXml(["unretained"])],
+    }), {
+      ...inspectionConfig,
+      maxPptxRetainedSlides: 1,
+      maxPptxSlideCharacters: 2,
+      maxPptxTextBlocksPerSlide: 1,
+    });
+
+    assert.equal(inspection.extraction.status, "extracted");
+    assert.equal(inspection.extraction.format, "pptx");
+    assert.deepEqual(inspection.extraction.slides, [{
+      slideNumber: 1,
+      textBlocks: ["A😀"],
+      textBlocksTruncated: true,
+      charactersTruncated: true,
+    }]);
+    assert.equal(inspection.extraction.slidesTruncated, true);
+  });
+
   it("rejects every configured package and declaration limit", async () => {
     const source = createPptx({ slides: 2, metadata: { title: "Title" } });
     const cases = [
@@ -285,16 +398,51 @@ describe("PPTX inspection", () => {
     }
   });
 
+  it("rejects slide part and visited-structure limits without partial output", async () => {
+    const source = createPptx({ slides: 2, metadata: { title: "Private" }, slideXmls: [slideXml([]), slideXml([])] });
+    const partLimited = await inspectPptx(source, { ...inspectionConfig, maxPptxSlideParts: 1 });
+    const structureLimited = await inspectPptx(source, { ...inspectionConfig, maxPptxSlideStructures: 1 });
+
+    assert.deepEqual(partLimited.extraction, {
+      status: "rejected",
+      format: "pptx",
+      reason: "PPTX_SLIDE_PART_LIMIT_EXCEEDED",
+    });
+    assert.deepEqual(structureLimited.extraction, {
+      status: "rejected",
+      format: "pptx",
+      reason: "PPTX_SLIDE_STRUCTURE_LIMIT_EXCEEDED",
+    });
+  });
+
   it("rejects malformed ZIP and metadata XML without partial metadata", async () => {
     for (const source of [
       Buffer.from("not a zip"),
       createPptx({ coreXml: '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties">' }),
       createPptx({ presentationXml: '<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">' }),
+      createPptx({ slides: 1, slideXmls: ['<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">'] }),
     ]) {
       const inspection = await inspectPptx(source);
       assert.deepEqual(inspection.extraction, { status: "rejected", format: "pptx", reason: "MALFORMED_PPTX" });
       assert.equal("metadata" in inspection.extraction, false);
     }
+  });
+
+  it("validates malformed slides after the retained-slide cutoff", async () => {
+    const inspection = await inspectPptx(createPptx({
+      slides: 2,
+      metadata: { title: "Private" },
+      slideXmls: [
+        slideXml(["Retained"]),
+        '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">',
+      ],
+    }), { ...inspectionConfig, maxPptxRetainedSlides: 1 });
+
+    assert.deepEqual(inspection.extraction, {
+      status: "rejected",
+      format: "pptx",
+      reason: "MALFORMED_PPTX",
+    });
   });
 
   it("rejects encrypted, macro-enabled, and unsupported presentations", async () => {
@@ -322,14 +470,13 @@ describe("PPTX inspection", () => {
     assert.deepEqual(missing.extraction, { status: "rejected", format: "pptx", reason: "MALFORMED_PPTX" });
   });
 
-  it("does not read slide or custom-property content", async () => {
+  it("does not read custom-property content", async () => {
     const inspection = await inspectPptx(createPptx({
       slides: 1,
       metadata: { title: "Safe" },
       extraEntries: [{ name: "docProps/custom.xml", content: "private custom metadata", method: 99 }],
     }));
     assert.equal(inspection.extraction.status, "extracted");
-    assert.equal(JSON.stringify(inspection.extraction).includes("private slide text"), false);
     assert.equal(JSON.stringify(inspection.extraction).includes("private custom metadata"), false);
   });
 

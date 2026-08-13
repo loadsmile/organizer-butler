@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { lstat, readdir } from "node:fs/promises";
+import { lstat, readdir, realpath } from "node:fs/promises";
 import path from "node:path";
 import { OrganizerError } from "../../domain/error.js";
 import type { ResolvedFile, ScannedFile } from "../../domain/file.js";
@@ -11,6 +11,17 @@ const ignoredSuffixes = [".crdownload", ".part", ".download", ".tmp"];
 type FileRecord = ScannedFile & {
   path: string;
   modifiedAtMs: number;
+  device: number;
+  inode: number;
+};
+
+export type ResolvedFileIdentity = ResolvedFile & {
+  device: number;
+  inode: number;
+  modifiedAtMs: number;
+  inboxRoot: string;
+  inboxRootDevice: number;
+  inboxRootInode: number;
 };
 
 export class FileIdentityError extends OrganizerError {
@@ -24,11 +35,15 @@ export class FileIdentityError extends OrganizerError {
 
 export class FileRegistry {
   readonly #files = new Map<string, FileRecord>();
+  #canonicalInboxRoot: string | undefined;
+  #inboxRootDevice: number | undefined;
+  #inboxRootInode: number | undefined;
 
   constructor(readonly inboxRoot: string) {}
 
   async scan(): Promise<ScannedFile[]> {
-    const entries = await readdir(this.inboxRoot, { withFileTypes: true });
+    const canonicalInboxRoot = await this.resolveCanonicalInboxRoot();
+    const entries = await readdir(canonicalInboxRoot, { withFileTypes: true });
     const files: ScannedFile[] = [];
 
     for (const entry of entries) {
@@ -36,8 +51,8 @@ export class FileRegistry {
         continue;
       }
 
-      const filePath = path.join(this.inboxRoot, entry.name);
-      assertPathInside(this.inboxRoot, filePath);
+      const filePath = path.join(canonicalInboxRoot, entry.name);
+      assertPathInside(canonicalInboxRoot, filePath);
       const stats = await lstat(filePath);
 
       if (!stats.isFile() || stats.isSymbolicLink()) {
@@ -53,7 +68,13 @@ export class FileRegistry {
         modifiedAt: stats.mtime.toISOString(),
       };
 
-      this.#files.set(file.fileId, { ...file, path: filePath, modifiedAtMs: stats.mtimeMs });
+      this.#files.set(file.fileId, {
+        ...file,
+        path: filePath,
+        modifiedAtMs: stats.mtimeMs,
+        device: stats.dev,
+        inode: stats.ino,
+      });
       files.push(file);
     }
 
@@ -61,13 +82,27 @@ export class FileRegistry {
   }
 
   async resolve(fileId: string): Promise<ResolvedFile> {
+    const {
+      device: _device,
+      inode: _inode,
+      modifiedAtMs: _modifiedAtMs,
+      inboxRoot: _inboxRoot,
+      inboxRootDevice: _inboxRootDevice,
+      inboxRootInode: _inboxRootInode,
+      ...resolved
+    } = await this.resolveIdentity(fileId);
+    return resolved;
+  }
+
+  async resolveIdentity(fileId: string): Promise<ResolvedFileIdentity> {
     const record = this.#files.get(fileId);
     if (!record) {
       throw new FileIdentityError("INVALID_FILE_ID", "The file ID was not produced by this server process.");
     }
 
+    const canonicalInboxRoot = await this.resolveCanonicalInboxRoot();
     try {
-      assertPathInside(this.inboxRoot, record.path);
+      assertPathInside(canonicalInboxRoot, record.path);
     } catch {
       throw new FileIdentityError("UNSAFE_PATH", "The recorded file path is outside the inbox.");
     }
@@ -86,12 +121,43 @@ export class FileRegistry {
       throw new FileIdentityError("FILE_CHANGED", "The scanned path is no longer a regular file.");
     }
 
-    if (stats.size !== record.size || stats.mtimeMs !== record.modifiedAtMs) {
+    if (
+      stats.dev !== record.device ||
+      stats.ino !== record.inode ||
+      stats.size !== record.size ||
+      stats.mtimeMs !== record.modifiedAtMs
+    ) {
       throw new FileIdentityError("FILE_CHANGED", "The file changed after it was scanned.");
     }
 
-    const { modifiedAtMs: _modifiedAtMs, ...resolved } = record;
-    return resolved;
+    return {
+      ...record,
+      inboxRoot: canonicalInboxRoot,
+      inboxRootDevice: this.#inboxRootDevice!,
+      inboxRootInode: this.#inboxRootInode!,
+    };
+  }
+
+  private async resolveCanonicalInboxRoot(): Promise<string> {
+    try {
+      const canonical = await realpath(this.inboxRoot);
+      const stats = await lstat(canonical);
+      if (
+        !stats.isDirectory() ||
+        (this.#canonicalInboxRoot !== undefined &&
+          (canonical !== this.#canonicalInboxRoot ||
+            stats.dev !== this.#inboxRootDevice ||
+            stats.ino !== this.#inboxRootInode))
+      ) {
+        throw new Error();
+      }
+      this.#canonicalInboxRoot = canonical;
+      this.#inboxRootDevice = stats.dev;
+      this.#inboxRootInode = stats.ino;
+      return canonical;
+    } catch {
+      throw new FileIdentityError("UNSAFE_PATH", "The inbox directory could not be validated.");
+    }
   }
 }
 

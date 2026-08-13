@@ -39,12 +39,23 @@ type InspectionConfig = Pick<
   | "maxXlsxWorksheets"
   | "maxXlsxRetainedSheetNames"
   | "maxXlsxSheetNameLength"
+  | "maxXlsxWorksheetParts"
+  | "maxXlsxRetainedSheets"
+  | "maxXlsxRowsPerSheet"
+  | "maxXlsxCellsPerRow"
+  | "maxXlsxCharacters"
+  | "maxXlsxSharedStringStructures"
+  | "maxXlsxWorksheetStructures"
   | "maxDocxSourceBytes"
   | "maxDocxPackageEntries"
   | "maxDocxCompressedMetadataBytes"
   | "maxDocxUncompressedMetadataBytes"
   | "maxDocxMetadataFields"
   | "maxDocxMetadataStringLength"
+  | "maxDocxBodyParts"
+  | "maxDocxBodyCharacters"
+  | "maxDocxBodyParagraphs"
+  | "maxDocxBodyStructures"
   | "maxPptxSourceBytes"
   | "maxPptxPackageEntries"
   | "maxPptxCompressedMetadataBytes"
@@ -52,6 +63,11 @@ type InspectionConfig = Pick<
   | "maxPptxSlides"
   | "maxPptxMetadataFields"
   | "maxPptxMetadataStringLength"
+  | "maxPptxSlideParts"
+  | "maxPptxRetainedSlides"
+  | "maxPptxSlideCharacters"
+  | "maxPptxTextBlocksPerSlide"
+  | "maxPptxSlideStructures"
   | "maxImageSourceBytes"
   | "maxImageDimension"
   | "maxImagePixels"
@@ -145,6 +161,13 @@ async function extractSupportedFile(
       maxWorksheets: config.maxXlsxWorksheets,
       maxRetainedSheetNames: config.maxXlsxRetainedSheetNames,
       maxSheetNameLength: config.maxXlsxSheetNameLength,
+      maxWorksheetParts: config.maxXlsxWorksheetParts,
+      maxRetainedSheets: config.maxXlsxRetainedSheets,
+      maxRowsPerSheet: config.maxXlsxRowsPerSheet,
+      maxCellsPerRow: config.maxXlsxCellsPerRow,
+      maxCharacters: config.maxXlsxCharacters,
+      maxSharedStringStructures: config.maxXlsxSharedStringStructures,
+      maxWorksheetStructures: config.maxXlsxWorksheetStructures,
     });
   }
 
@@ -156,6 +179,10 @@ async function extractSupportedFile(
       maxUncompressedMetadataBytes: config.maxDocxUncompressedMetadataBytes,
       maxMetadataFields: config.maxDocxMetadataFields,
       maxMetadataStringLength: config.maxDocxMetadataStringLength,
+      maxBodyParts: config.maxDocxBodyParts,
+      maxBodyCharacters: config.maxDocxBodyCharacters,
+      maxBodyParagraphs: config.maxDocxBodyParagraphs,
+      maxBodyStructures: config.maxDocxBodyStructures,
     });
   }
 
@@ -168,6 +195,11 @@ async function extractSupportedFile(
       maxSlides: config.maxPptxSlides,
       maxMetadataFields: config.maxPptxMetadataFields,
       maxMetadataStringLength: config.maxPptxMetadataStringLength,
+      maxSlideParts: config.maxPptxSlideParts,
+      maxRetainedSlides: config.maxPptxRetainedSlides,
+      maxSlideCharacters: config.maxPptxSlideCharacters,
+      maxTextBlocksPerSlide: config.maxPptxTextBlocksPerSlide,
+      maxSlideStructures: config.maxPptxSlideStructures,
     });
   }
 

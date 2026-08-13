@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { link, mkdtemp, mkdir, realpath, rm, stat, symlink, unlink, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -73,7 +73,7 @@ describe("FileRegistry", () => {
     const [file] = await registry.scan();
 
     const resolved = await registry.resolve(file!.fileId);
-    assert.equal(resolved.path, path.join(inbox, "document.txt"));
+    assert.equal(resolved.path, path.join(await realpath(inbox), "document.txt"));
 
     await assert.rejects(
       registry.resolve("file_fabricated"),
@@ -95,6 +95,44 @@ describe("FileRegistry", () => {
     await assert.rejects(
       registry.resolve(file!.fileId),
       (error: unknown) => error instanceof FileIdentityError && error.code === "FILE_NOT_FOUND",
+    );
+  });
+
+  it("rejects a replacement even when size and modification time are preserved", async () => {
+    const inbox = await createInbox();
+    const filePath = path.join(inbox, "document.txt");
+    await writeFile(filePath, "original");
+    const originalStats = await stat(filePath);
+    const registry = new FileRegistry(inbox);
+    const [file] = await registry.scan();
+
+    await unlink(filePath);
+    await writeFile(filePath, "replaced");
+    await utimes(filePath, originalStats.atime, originalStats.mtime);
+
+    await assert.rejects(
+      registry.resolve(file!.fileId),
+      (error: unknown) => error instanceof FileIdentityError && error.code === "FILE_CHANGED",
+    );
+  });
+
+  it("rejects an inbox root replaced by a symlink even when the same inode is reachable", async () => {
+    const base = await createInbox();
+    const inbox = path.join(base, "inbox");
+    const outside = path.join(base, "outside");
+    await mkdir(inbox);
+    await mkdir(outside);
+    const sourcePath = path.join(inbox, "document.txt");
+    await writeFile(sourcePath, "content");
+    const registry = new FileRegistry(inbox);
+    const [file] = await registry.scan();
+    await link(sourcePath, path.join(outside, "document.txt"));
+    await rm(inbox, { recursive: true });
+    await symlink(outside, inbox);
+
+    await assert.rejects(
+      registry.resolve(file!.fileId),
+      (error: unknown) => error instanceof FileIdentityError && error.code === "UNSAFE_PATH",
     );
   });
 });
