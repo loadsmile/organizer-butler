@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { link, mkdtemp, mkdir, realpath, rm, stat, symlink, unlink, utimes, writeFile } from "node:fs/promises";
+import { lstat, link, mkdtemp, mkdir, readdir, realpath, rm, stat, symlink, unlink, utimes, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -53,6 +54,93 @@ describe("FileRegistry", () => {
     const files = await new FileRegistry(inbox).scan();
 
     assert.deepEqual(files.map((file) => file.filename), ["visible.txt"]);
+  });
+
+  it("reports detailed non-recursive skip counts without exposing paths", async () => {
+    const inbox = await createInbox();
+    const outside = await createInbox();
+    await Promise.all([
+      writeFile(path.join(inbox, "visible.txt"), "ok"),
+      writeFile(path.join(inbox, ".hidden.txt"), "hidden"),
+      writeFile(path.join(inbox, "pending.download"), "pending"),
+      writeFile(path.join(outside, "target.txt"), "target"),
+      mkdir(path.join(inbox, "nested")),
+      mkdir(path.join(inbox, "Example.app")),
+    ]);
+    await Promise.all([
+      writeFile(path.join(inbox, "nested", "not-enumerated.txt"), "nested"),
+      writeFile(path.join(inbox, "Example.app", "not-enumerated.txt"), "bundle"),
+      symlink(path.join(outside, "target.txt"), path.join(inbox, "linked.txt")),
+    ]);
+
+    const result = await new FileRegistry(inbox).scanDetailed();
+
+    assert.deepEqual(result.files.map((file) => file.filename), ["visible.txt"]);
+    assert.equal(JSON.stringify(result).includes(inbox), false);
+    assert.deepEqual(result, {
+      files: result.files,
+      skippedEntryCount: 5,
+      skipped: {
+        hiddenFiles: 1,
+        temporaryDownloads: 1,
+        symbolicLinks: 1,
+        directories: 1,
+        applicationBundles: 1,
+        nonRegularEntries: 0,
+        disappearedEntries: 0,
+        unreadableEntries: 0,
+        nestedEntriesNotEnumerated: 2,
+      },
+    });
+  });
+
+  it("reports entries that disappear or cannot be read during metadata lookup", async () => {
+    const inbox = await createInbox();
+    await Promise.all([
+      writeFile(path.join(inbox, "disappeared.txt"), "gone"),
+      writeFile(path.join(inbox, "unreadable.txt"), "blocked"),
+    ]);
+    const registry = new FileRegistry(inbox, {
+      async readdir(directoryPath) {
+        return readdir(directoryPath, { withFileTypes: true });
+      },
+      realpath,
+      async lstat(entryPath) {
+        if (path.basename(entryPath) === "disappeared.txt") {
+          throw Object.assign(new Error("private missing path"), { code: "ENOENT" });
+        }
+        if (path.basename(entryPath) === "unreadable.txt") {
+          throw Object.assign(new Error("private permission detail"), { code: "EACCES" });
+        }
+        return lstat(entryPath);
+      },
+    });
+
+    const result = await registry.scanDetailed();
+
+    assert.deepEqual(result.files, []);
+    assert.equal(result.skippedEntryCount, 2);
+    assert.equal(result.skipped.disappearedEntries, 1);
+    assert.equal(result.skipped.unreadableEntries, 1);
+    assert.equal(JSON.stringify(result).includes("private"), false);
+  });
+
+  it("reports Unix domain sockets as non-regular entries", { skip: process.platform === "win32" }, async () => {
+    const inbox = await createInbox();
+    const socketPath = path.join(inbox, "service.sock");
+    const server = createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socketPath, resolve);
+    });
+
+    try {
+      const result = await new FileRegistry(inbox).scanDetailed();
+      assert.equal(result.skippedEntryCount, 1);
+      assert.equal(result.skipped.nonRegularEntries, 1);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
   });
 
   it("rejects symlinks even when they target a regular file", async () => {

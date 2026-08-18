@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { lstat, readdir, realpath } from "node:fs/promises";
+import type { Dirent, Stats } from "node:fs";
 import path from "node:path";
 import { OrganizerError } from "../../domain/error.js";
 import type { ResolvedFile, ScannedFile } from "../../domain/file.js";
@@ -13,6 +14,38 @@ type FileRecord = ScannedFile & {
   modifiedAtMs: number;
   device: number;
   inode: number;
+};
+
+export type ScanSkippedEntryCounts = {
+  hiddenFiles: number;
+  temporaryDownloads: number;
+  symbolicLinks: number;
+  directories: number;
+  applicationBundles: number;
+  nonRegularEntries: number;
+  disappearedEntries: number;
+  unreadableEntries: number;
+  nestedEntriesNotEnumerated: number;
+};
+
+export type DetailedScanResult = {
+  files: ScannedFile[];
+  skippedEntryCount: number;
+  skipped: ScanSkippedEntryCounts;
+};
+
+type FileRegistryOperations = {
+  readdir(directoryPath: string): Promise<Dirent[]>;
+  lstat(entryPath: string): Promise<Stats>;
+  realpath(directoryPath: string): Promise<string>;
+};
+
+const defaultOperations: FileRegistryOperations = {
+  async readdir(directoryPath) {
+    return readdir(directoryPath, { withFileTypes: true });
+  },
+  lstat,
+  realpath,
 };
 
 export type ResolvedFileIdentity = ResolvedFile & {
@@ -39,23 +72,47 @@ export class FileRegistry {
   #inboxRootDevice: number | undefined;
   #inboxRootInode: number | undefined;
 
-  constructor(readonly inboxRoot: string) {}
+  constructor(
+    readonly inboxRoot: string,
+    private readonly operations: FileRegistryOperations = defaultOperations,
+  ) {}
 
   async scan(): Promise<ScannedFile[]> {
+    return (await this.scanDetailed()).files;
+  }
+
+  async scanDetailed(): Promise<DetailedScanResult> {
     const canonicalInboxRoot = await this.resolveCanonicalInboxRoot();
-    const entries = await readdir(canonicalInboxRoot, { withFileTypes: true });
+    const entries = await this.operations.readdir(canonicalInboxRoot);
     const files: ScannedFile[] = [];
+    const skipped = emptySkippedEntryCounts();
+    let skippedEntryCount = 0;
 
     for (const entry of entries) {
-      if (!entry.isFile() || entry.isSymbolicLink() || shouldIgnore(entry.name)) {
+      const skippedKind = classifyDirectoryEntry(entry);
+      if (skippedKind) {
+        skipped[skippedKind] += 1;
+        skippedEntryCount += 1;
+        if (entry.isDirectory()) skipped.nestedEntriesNotEnumerated += 1;
         continue;
       }
 
       const filePath = path.join(canonicalInboxRoot, entry.name);
       assertPathInside(canonicalInboxRoot, filePath);
-      const stats = await lstat(filePath);
+      let stats: Stats;
+      try {
+        stats = await this.operations.lstat(filePath);
+      } catch (error) {
+        skipped[isMissingFileError(error) ? "disappearedEntries" : "unreadableEntries"] += 1;
+        skippedEntryCount += 1;
+        continue;
+      }
 
-      if (!stats.isFile() || stats.isSymbolicLink()) {
+      const changedKind = classifyStats(entry.name, stats);
+      if (changedKind) {
+        skipped[changedKind] += 1;
+        skippedEntryCount += 1;
+        if (stats.isDirectory()) skipped.nestedEntriesNotEnumerated += 1;
         continue;
       }
 
@@ -78,7 +135,11 @@ export class FileRegistry {
       files.push(file);
     }
 
-    return files.sort((left, right) => left.filename.localeCompare(right.filename));
+    return {
+      files: files.sort((left, right) => left.filename.localeCompare(right.filename)),
+      skippedEntryCount,
+      skipped,
+    };
   }
 
   async resolve(fileId: string): Promise<ResolvedFile> {
@@ -140,8 +201,8 @@ export class FileRegistry {
 
   private async resolveCanonicalInboxRoot(): Promise<string> {
     try {
-      const canonical = await realpath(this.inboxRoot);
-      const stats = await lstat(canonical);
+      const canonical = await this.operations.realpath(this.inboxRoot);
+      const stats = await this.operations.lstat(canonical);
       if (
         !stats.isDirectory() ||
         (this.#canonicalInboxRoot !== undefined &&
@@ -161,9 +222,43 @@ export class FileRegistry {
   }
 }
 
-function shouldIgnore(filename: string): boolean {
+function classifyDirectoryEntry(entry: Dirent): keyof ScanSkippedEntryCounts | undefined {
+  if (entry.isSymbolicLink()) return "symbolicLinks";
+  if (entry.isDirectory()) return isApplicationBundle(entry.name) ? "applicationBundles" : "directories";
+  if (!entry.isFile()) return "nonRegularEntries";
+  return classifyIgnoredName(entry.name);
+}
+
+function classifyStats(filename: string, stats: Stats): keyof ScanSkippedEntryCounts | undefined {
+  if (stats.isSymbolicLink()) return "symbolicLinks";
+  if (stats.isDirectory()) return isApplicationBundle(filename) ? "applicationBundles" : "directories";
+  if (!stats.isFile()) return "nonRegularEntries";
+  return undefined;
+}
+
+function classifyIgnoredName(filename: string): "hiddenFiles" | "temporaryDownloads" | undefined {
   const lowerName = filename.toLowerCase();
-  return filename.startsWith(".") || ignoredSuffixes.some((suffix) => lowerName.endsWith(suffix));
+  if (filename.startsWith(".")) return "hiddenFiles";
+  if (ignoredSuffixes.some((suffix) => lowerName.endsWith(suffix))) return "temporaryDownloads";
+  return undefined;
+}
+
+function isApplicationBundle(filename: string): boolean {
+  return filename.toLowerCase().endsWith(".app");
+}
+
+function emptySkippedEntryCounts(): ScanSkippedEntryCounts {
+  return {
+    hiddenFiles: 0,
+    temporaryDownloads: 0,
+    symbolicLinks: 0,
+    directories: 0,
+    applicationBundles: 0,
+    nonRegularEntries: 0,
+    disappearedEntries: 0,
+    unreadableEntries: 0,
+    nestedEntriesNotEnumerated: 0,
+  };
 }
 
 function isMissingFileError(error: unknown): error is NodeJS.ErrnoException {

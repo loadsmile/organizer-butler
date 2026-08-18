@@ -1,11 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { OrganizerConfig } from "../config/config.js";
-import {
-  submittedClassificationSchema,
-  validateSubmittedClassification,
-} from "../core/classification/validateSubmittedClassification.js";
-import { inspectFile } from "../core/inspector/inspectFile.js";
+import { submittedClassificationSchema } from "../core/classification/validateSubmittedClassification.js";
 import {
   OrganizationPlanRegistry,
   type OrganizationPlanRegistryOptions,
@@ -14,13 +10,13 @@ import { FileRegistry } from "../core/scanner/scanDownloads.js";
 import { areas } from "../core/taxonomy/areas.js";
 import { documentTypes } from "../core/taxonomy/documentTypes.js";
 import { OrganizerError } from "../domain/error.js";
-import { SqliteExecutionStore } from "../core/planning/executionStore.js";
 import type { OrganizationExecutionResult } from "../domain/organizationPlan.js";
 import {
   DirectoryPlanRegistry,
   type DirectoryPlanRegistryOptions,
 } from "../core/planning/directoryPlanning.js";
 import type { DirectoryExecutionResult } from "../domain/directoryPlan.js";
+import { OrganizerApplication } from "../application/organizerApplication.js";
 
 const scannedFileSchema = z
   .object({
@@ -235,6 +231,7 @@ const executionAnnotations = {
 
 export type OrganizerMcpServer = {
   server: McpServer;
+  application: OrganizerApplication;
   registry: FileRegistry;
   planRegistry: OrganizationPlanRegistry;
   directoryPlanRegistry: DirectoryPlanRegistry;
@@ -251,53 +248,20 @@ export async function initializeOrganizerMcpServer(
   config: OrganizerConfig,
   options: Omit<OrganizerMcpServerOptions, "planRegistryOptions" | "directoryPlanRegistryOptions" | "mutationUnavailable"> = {},
 ): Promise<OrganizerMcpServer> {
-  let store: SqliteExecutionStore | undefined;
-  try {
-    const executionStore = new SqliteExecutionStore(config.databasePath, { recoveryLeaseMs: config.executionRecoveryLeaseMs });
-    store = executionStore;
-    const result = createOrganizerMcpServer(config, {
-      ...options,
-      planRegistryOptions: { executionStore },
-      directoryPlanRegistryOptions: { executionStore },
-    });
-    await result.directoryPlanRegistry.recover();
-    await result.planRegistry.recover();
-    executionStore.cleanupTerminal(Date.now(), {
-      invalidatedMs: config.invalidatedExecutionRetentionMs,
-      expiredMs: config.expiredExecutionRetentionMs,
-      completedMs: config.completedExecutionReplayRetentionMs,
-    });
-    executionStore.cleanupTerminalDirectories(Date.now(), {
-      invalidatedMs: config.invalidatedExecutionRetentionMs,
-      expiredMs: config.expiredExecutionRetentionMs,
-      completedMs: config.completedExecutionReplayRetentionMs,
-    });
-    let closed = false;
-    return {
-      ...result,
-      async shutdown() {
-        if (closed) return;
-        closed = true;
-        await result.planRegistry.waitForActiveExecutions();
-        await result.directoryPlanRegistry.waitForActiveExecutions();
-        executionStore.close();
-      },
-    };
-  } catch {
-    try {
-      store?.close();
-    } catch {}
-    return createOrganizerMcpServer(config, { ...options, mutationUnavailable: true });
-  }
+  const application = OrganizerApplication.createDurable(config, options);
+  await application.initialize();
+  return createOrganizerMcpAdapter(application);
 }
 
 export function createOrganizerMcpServer(
   config: OrganizerConfig,
   options: OrganizerMcpServerOptions = {},
 ): OrganizerMcpServer {
-  const registry = new FileRegistry(config.downloadsDirectory);
-  const planRegistry = new OrganizationPlanRegistry(options.planRegistryOptions);
-  const directoryPlanRegistry = new DirectoryPlanRegistry(options.directoryPlanRegistryOptions);
+  const application = OrganizerApplication.createInMemory(config, options);
+  return createOrganizerMcpAdapter(application);
+}
+
+export function createOrganizerMcpAdapter(application: OrganizerApplication): OrganizerMcpServer {
   const server = new McpServer({ name: "organizer-butler", version: "0.1.0" });
 
   server.registerTool(
@@ -308,7 +272,7 @@ export function createOrganizerMcpServer(
       outputSchema: scanOutputSchema,
       annotations: readOnlyAnnotations,
     },
-    async () => toolResult(await safelyRun(async () => ({ ok: true as const, files: await registry.scan() }))),
+    async () => toolResult(await safelyRun(async () => ({ ok: true as const, files: await application.scan() }))),
   );
 
   server.registerTool(
@@ -323,7 +287,7 @@ export function createOrganizerMcpServer(
       toolResult(
         await safelyRun(async () => ({
           ok: true as const,
-          inspection: await inspectFile(registry, fileId, config),
+          inspection: await application.inspect(fileId),
         })),
       ),
   );
@@ -345,14 +309,9 @@ export function createOrganizerMcpServer(
     async ({ fileId, classification: submittedClassification }) =>
       toolResult(
         await safelyRun(async () => {
-          const inspection = await inspectFile(registry, fileId, config);
-          const classification = validateSubmittedClassification(
-            inspection,
-            submittedClassification,
-          );
           return {
             ok: true as const,
-            plan: await planRegistry.preview(registry, classification, config),
+            plan: await application.submitClassificationAndPreview(fileId, submittedClassification),
           };
         }),
       ),
@@ -368,7 +327,7 @@ export function createOrganizerMcpServer(
     },
     async ({ planId }) => toolResult(await safelyRun(async () => ({
       ok: true as const,
-      directoryPlan: await directoryPlanRegistry.preview(planRegistry, planId, config),
+      directoryPlan: await application.previewDirectories(planId),
     }))),
   );
 
@@ -381,8 +340,7 @@ export function createOrganizerMcpServer(
       annotations: confirmationAnnotations,
     },
     async ({ directoryPlanId }) => toolResult(await safelyRun(async () => {
-      assertMutationAvailable(options.mutationUnavailable);
-      return { ok: true as const, confirmation: await directoryPlanRegistry.confirm(directoryPlanId) };
+      return { ok: true as const, confirmation: await application.confirmDirectories(directoryPlanId) };
     })),
   );
 
@@ -395,10 +353,9 @@ export function createOrganizerMcpServer(
       annotations: { ...executionAnnotations, destructiveHint: false },
     },
     async ({ directoryConfirmationId }) => toolResult(await safelyRun(async () => {
-      assertMutationAvailable(options.mutationUnavailable);
       return {
         ok: true as const,
-        execution: await directoryPlanRegistry.execute(directoryConfirmationId),
+        execution: await application.executeDirectories(directoryConfirmationId),
       } satisfies { ok: true; execution: DirectoryExecutionResult };
     })),
   );
@@ -415,10 +372,9 @@ export function createOrganizerMcpServer(
     async ({ planId }) =>
       toolResult(
         await safelyRun(async () => {
-          assertMutationAvailable(options.mutationUnavailable);
           return {
             ok: true as const,
-            confirmation: await planRegistry.confirm(planId),
+            confirmation: await application.confirmMove(planId),
           };
         }),
       ),
@@ -436,22 +392,22 @@ export function createOrganizerMcpServer(
     async ({ confirmationId }) =>
       toolResult(
         await safelyRun(async () => {
-          assertMutationAvailable(options.mutationUnavailable);
           return {
             ok: true as const,
-            execution: await planRegistry.execute(confirmationId),
+            execution: await application.executeMove(confirmationId),
           } satisfies { ok: true; execution: OrganizationExecutionResult };
         }),
       ),
   );
 
-  return { server, registry, planRegistry, directoryPlanRegistry, async shutdown() {} };
-}
-
-function assertMutationAvailable(unavailable: boolean | undefined): void {
-  if (unavailable) {
-    throw new OrganizerError("EXECUTION_STORAGE_FAILED", "The organization operation state could not be stored safely.");
-  }
+  return {
+    server,
+    application,
+    get registry() { return application.registry; },
+    get planRegistry() { return application.planRegistry; },
+    get directoryPlanRegistry() { return application.directoryPlanRegistry; },
+    shutdown: () => application.shutdown(),
+  };
 }
 
 async function safelyRun<T>(operation: () => Promise<T>): Promise<T | { ok: false; error: z.infer<typeof organizerErrorSchema> }> {
